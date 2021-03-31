@@ -1,6 +1,12 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using DG.Tweening;
+using Ink.Parsed;
 using UnityEngine;
+using UnityEngine.PlayerLoop;
+using UnityEngine.XR.WSA.Input;
 
 [RequireComponent(typeof(CharacterController))]
 
@@ -8,6 +14,7 @@ public class PlayerController : MonoBehaviour
 {
     #region Variables
     
+    [Header("Movement")]
     //Movement Vars
     [Range(0,10)]
     public float MoveSpeed = 1; //Maximum movement speed
@@ -24,9 +31,16 @@ public class PlayerController : MonoBehaviour
     private Quaternion _originalRotation;
 
     private Vector3 _velocity = new Vector3();
+
+    [Header("Interaction")] 
+    public float InteractDistance = 10f;
+
+    public float InteractRadius = 5f;
+    public GameObject InteractingObj;
     
     //Components
     private CharacterController _charController;
+    private Camera _myCamera;
     
     
    
@@ -40,17 +54,54 @@ public class PlayerController : MonoBehaviour
         
         //Set up Mouse Look
         _originalRotation = transform.localRotation;
-    }
 
+        _myCamera = transform.GetComponentInChildren<Camera>();
+        
+        //Set up some events
+        EventManager.Instance.AddHandler<ExitInteractEvent>(OnExitInteract);
+    }
+    
     // Update is called once per frame
     private void Update()
     {
-       ProcessInput();
+        switch (GameManager.Instance.State)
+        {
+            case GameState.Exploring:
+                ExplorationUpdate();
+                break;
+            case GameState.Dialogue:
+                DialogueUpdate();
+                break;
+            case GameState.Interacting:
+                InteractUpdate();
+                break;
+        }
     }
 
-    private void ProcessInput()
+    private void ExplorationUpdate()
     {
-        //Moving
+        //Check for inputs
+        ProcessMovement();
+        
+        //Check for Interaction
+        CheckInteract();
+    }
+
+    private void DialogueUpdate()
+    {
+        if (DialogueManager.Instance.State == DialogueState.End)
+            StartCoroutine(EndDialogue());
+    }
+
+    private Vector3 _lastMousePos;
+    private void InteractUpdate()
+    {
+        if (Input.GetButtonDown("Interact"))
+            StartCoroutine(EndInteract());
+    }
+
+    private void ProcessMovement()
+    {
         float h = Input.GetAxis("Horizontal") * MoveSpeed;
         float v = Input.GetAxis("Vertical") * MoveSpeed;
 
@@ -84,5 +135,117 @@ public class PlayerController : MonoBehaviour
         }
         
         _charController.Move(move + _velocity * Time.deltaTime);
+    }
+
+    private RaycastHit CheckInteract()
+    {
+        
+        RaycastHit hit;
+
+        if (Physics.Raycast(Camera.main.transform.position, transform.TransformDirection(Vector3.forward), out hit,
+            InteractDistance))
+        {
+            //NPCs
+            if (hit.collider.CompareTag("NPC"))
+            {
+                NPC npc = hit.collider.GetComponent<NPC>();
+                //Put outline on npc
+
+                npc.Highlight = true;
+                
+                //Display tooltip
+                UIManager.Instance.ShowInteractTip(npc.Name, npc.Verb);
+                if (Input.GetButtonDown("Interact"))
+                {
+                    //Start Dialog
+                    StartCoroutine(StartDialogue(npc.CurrentDialogue, npc.LookTarget));
+                }
+                
+                //Debug.Log("hit npc");
+            }
+
+            if (hit.collider.CompareTag("InteractableObj"))
+            {
+                InteractableObj obj = hit.collider.GetComponent<InteractableObj>();
+
+                obj.Highlight = true;
+                
+                //Display tooltip
+                UIManager.Instance.ShowInteractTip(obj.Name, obj.Verb);
+                if (Input.GetButtonDown("Interact"))
+                {
+                    //Start Interact
+                    Debug.Log("pick up");
+                    StartCoroutine(StartInteract(obj.gameObject));
+                }
+            }
+        }
+        
+        return hit;
+    }
+
+    private void OnDrawGizmos()
+    {
+        Gizmos.color = Color.red;
+       // Gizmos.DrawWireSphere(transform.position + transform.TransformDirection(Vector3.forward)*InteractDistance, InteractRadius);
+        //Gizmos.DrawRay(Camera.main.transform.position, transform.TransformDirection(Vector3.forward)*InteractDistance);
+    }
+
+    private IEnumerator StartDialogue(TextAsset dialogue, Transform lookTarget)
+    {
+        UIManager.Instance.Reticle = false;
+        GameManager.Instance.State = GameState.Transition;
+        DialogueManager.Instance.LoadDialogue(dialogue);
+        Tween tween;
+
+        yield return new WaitForSeconds(UIManager.Instance.ToggleDialogue());
+        
+        Vector3 targetDirection = lookTarget.position - _myCamera.transform.position;
+        Vector3 newDirection = Vector3.RotateTowards(_myCamera.transform.forward, targetDirection, 1f, 0f);
+        tween =
+            _myCamera.transform.DORotate(Quaternion.LookRotation(newDirection).eulerAngles,0.5f);
+        yield return tween.WaitForCompletion();
+        GameManager.Instance.State = GameState.Dialogue;
+        DialogueManager.Instance.State = DialogueState.Printing;
+    }
+    
+    private IEnumerator EndDialogue()
+    {
+        GameManager.Instance.State = GameState.Transition;
+        Tween tween;
+
+        yield return new WaitForSeconds(UIManager.Instance.ToggleDialogue());
+        
+        tween = _myCamera.transform.DOLocalRotate(Vector3.zero, 0.5f);
+        yield return tween.WaitForCompletion();
+        GameManager.Instance.State = GameState.Exploring;
+        UIManager.Instance.Reticle = true;
+
+    }
+
+    private IEnumerator StartInteract(GameObject obj)
+    {
+        UIManager.Instance.Reticle = false;
+        GameManager.Instance.State = GameState.Transition;
+
+        yield return new WaitForSeconds(UIManager.Instance.ToggleInteract(obj));
+
+        GameManager.Instance.State = GameState.Interacting;
+    }
+
+    //Helper method so we can end interact from other places
+    private void OnExitInteract(GameEvent evt)
+    {
+        StartCoroutine(EndInteract());
+    }
+    
+    private IEnumerator EndInteract()
+    {
+        GameManager.Instance.State = GameState.Transition;
+
+        yield return new WaitForSeconds(UIManager.Instance.ToggleInteract());
+
+        GameManager.Instance.State = GameState.Exploring;
+        UIManager.Instance.Reticle = true;
     }
 }
